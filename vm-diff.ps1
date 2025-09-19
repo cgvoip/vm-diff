@@ -1,5 +1,6 @@
 # PowerShell script to compare Azure VM configuration JSON files with matching prefixes
-# in two different folders, verify prefix count, report missing files, and output differences.
+# in two different folders, verify prefix count, report missing files, and output differing lines
+# only for files with differences. If no differences are found across all files, output a single message.
 
 param (
     [Parameter(Mandatory=$true)]
@@ -9,58 +10,32 @@ param (
     [string]$PostFolder
 )
 
-# Function for recursive comparison of two PSCustomObjects
-function Compare-Objects {
+# Function to compare two files line-by-line and return differences
+function Compare-FileLines {
     param (
-        $preCheck,
-        $postCheck,
-        [string]$Path = ""
+        [string]$PreFilePath,
+        [string]$PostFilePath
     )
 
     $differences = @()
 
-    # Get all unique properties from both objects
-    $preProps = if ($preCheck) { $preCheck | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name } else { @() }
-    $postProps = if ($postCheck) { $postCheck | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name } else { @() }
-    $allProps = ($preProps + $postProps) | Sort-Object -Unique
+    # Read files as arrays of lines
+    $preLines = Get-Content -Path $PreFilePath
+    $postLines = Get-Content -Path $PostFilePath
 
-    foreach ($prop in $allProps) {
-        $currentPath = if ($Path) { "$Path.$prop" } else { $prop }
-        $val1 = if ($preCheck) { $preCheck.$prop } else { $null }
-        $val2 = if ($postCheck) { $postCheck.$prop } else { $null }
+    # Get the maximum number of lines to compare
+    $maxLines = [Math]::Max($preLines.Count, $postLines.Count)
 
-        if ($null -eq $val1 -and $null -eq $val2) { continue }
+    # Compare each line
+    for ($i = 0; $i -lt $maxLines; $i++) {
+        $preLine = if ($i -lt $preLines.Count) { $preLines[$i] } else { "<EOF>" }
+        $postLine = if ($i -lt $postLines.Count) { $postLines[$i] } else { "<EOF>" }
 
-        if (($val1 -is [PSCustomObject]) -and ($val2 -is [PSCustomObject])) {
-            # Recursive call for nested objects
-            $subDiffs = Compare-Objects -preCheck $val1 -postCheck $val2 -Path $currentPath
-            if ($subDiffs) {
-                $differences += $subDiffs
-            }
-        } elseif (($val1 -is [Array]) -and ($val2 -is [Array])) {
-            # Compare arrays
-            if ($val1.Count -ne $val2.Count) {
-                $differences += [PSCustomObject]@{
-                    Property = $currentPath
-                    Before   = "Array length: $($val1.Count)"
-                    After    = "Array length: $($val2.Count)"
-                }
-            } else {
-                for ($i = 0; $i -lt $val1.Count; $i++) {
-                    $subDiffs = Compare-Objects -preCheck $val1[$i] -postCheck $val2[$i] -Path "$currentPath[$i]"
-                    if ($subDiffs) {
-                        $differences += $subDiffs
-                    }
-                }
-            }
-        } else {
-            # Compare primitive values
-            if ($val1 -ne $val2) {
-                $differences += [PSCustomObject]@{
-                    Property = $currentPath
-                    Before   = $val1
-                    After    = $val2
-                }
+        if ($preLine -ne $postLine) {
+            $differences += [PSCustomObject]@{
+                LineNumber = $i + 1
+                Before     = $preLine
+                After      = $postLine
             }
         }
     }
@@ -133,10 +108,12 @@ if (-not $matchingPrefixes) {
     exit 0
 }
 
+# Track if any differences were found
+$hasDifferences = $false
+$allDiffs = @()
+
 # Compare files for each matching prefix
 foreach ($prefix in $matchingPrefixes) {
-    Write-Output "Comparing files for prefix: $prefix"
-
     # Get the first matching file from each folder (assuming one file per VM per folder)
     $preFile = $preFiles | Where-Object { $_.Name -like "$prefix-*.json" } | Select-Object -First 1
     $postFile = $postFiles | Where-Object { $_.Name -like "$prefix-*.json" } | Select-Object -First 1
@@ -146,21 +123,29 @@ foreach ($prefix in $matchingPrefixes) {
         continue
     }
 
-    Write-Output "Comparing $($preFile.Name) with $($postFile.Name)"
+    # Compare files line-by-line
+    $diffs = Compare-FileLines -PreFilePath $preFile.FullName -PostFilePath $postFile.FullName
 
-    # Read the JSON files
-    $beforeConfig = Get-Content -Path $preFile.FullName -Raw | ConvertFrom-Json
-    $afterConfig = Get-Content -Path $postFile.FullName -Raw | ConvertFrom-Json
-
-    # Perform comparison
-    $diffs = Compare-Objects -preCheck $beforeConfig -postCheck $afterConfig
-
-    if ($diffs.Count -eq 0) {
-        Write-Output "No differences found between $($preFile.Name) and $($postFile.Name)."
-    } else {
-        Write-Output "Differences found for $prefix :"
-        $diffs | Format-Table -AutoSize
+    if ($diffs.Count -gt 0) {
+        $hasDifferences = $true
+        $allDiffs += [PSCustomObject]@{
+            Prefix = $prefix
+            PreFile = $preFile.Name
+            PostFile = $postFile.Name
+            Differences = $diffs
+        }
     }
+}
+
+# Output results
+if ($hasDifferences) {
+    Write-Output "Differences found in the following files:"
+    foreach ($diff in $allDiffs) {
+        Write-Output "Comparing $($diff.PreFile) with $($diff.PostFile) for prefix: $($diff.Prefix)"
+        $diff.Differences | Format-Table LineNumber, @{Label="Before";Expression={$_.Before}}, @{Label="After";Expression={$_.After}} -AutoSize
+    }
+} else {
+    Write-Output "All files are showing no differences."
 }
 
 Write-Output "Comparison complete."
