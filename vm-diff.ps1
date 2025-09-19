@@ -1,11 +1,12 @@
-# PowerShell script to compare two Azure VM configuration JSON files and output differences.
+# PowerShell script to compare Azure VM configuration JSON files with matching prefixes
+# in two different folders, verify prefix count, report missing files, and output differences.
 
 param (
     [Parameter(Mandatory=$true)]
-    [string]$preFilePath,
+    [string]$PreFolder,
 
     [Parameter(Mandatory=$true)]
-    [string]$postFilePath
+    [string]$PostFolder
 )
 
 # Function for recursive comparison of two PSCustomObjects
@@ -32,7 +33,7 @@ function Compare-Objects {
 
         if (($val1 -is [PSCustomObject]) -and ($val2 -is [PSCustomObject])) {
             # Recursive call for nested objects
-            $subDiffs = Compare-Objects -Obj1 $val1 -Obj2 $val2 -Path $currentPath
+            $subDiffs = Compare-Objects -preCheck $val1 -postCheck $val2 -Path $currentPath
             if ($subDiffs) {
                 $differences += $subDiffs
             }
@@ -46,7 +47,7 @@ function Compare-Objects {
                 }
             } else {
                 for ($i = 0; $i -lt $val1.Count; $i++) {
-                    $subDiffs = Compare-Objects -Obj1 $val1[$i] -Obj2 $val2[$i] -Path "$currentPath[$i]"
+                    $subDiffs = Compare-Objects -preCheck $val1[$i] -postCheck $val2[$i] -Path "$currentPath[$i]"
                     if ($subDiffs) {
                         $differences += $subDiffs
                     }
@@ -67,25 +68,99 @@ function Compare-Objects {
     return $differences
 }
 
-# Read the JSON files
-if (-not (Test-Path $preFilePath)) {
-    Write-Error "Before file not found: $preFilePath"
+# Validate folder paths
+if (-not (Test-Path $PreFolder)) {
+    Write-Error "Pre-upgrade folder not found: $PreFolder"
     exit 1
 }
-if (-not (Test-Path $postFilePath)) {
-    Write-Error "After file not found: $postFilePath"
+if (-not (Test-Path $PostFolder)) {
+    Write-Error "Post-upgrade folder not found: $PostFolder"
     exit 1
 }
 
-$beforeConfig = Get-Content -Path $preFilePath -Raw | ConvertFrom-Json
-$afterConfig = Get-Content -Path $postFilePath -Raw | ConvertFrom-Json
+# Get JSON files from both folders
+$preFiles = Get-ChildItem -Path $PreFolder -Filter "*.json" | Select-Object Name, FullName
+$postFiles = Get-ChildItem -Path $PostFolder -Filter "*.json" | Select-Object Name, FullName
 
-# Perform comparison
-$diffs = Compare-Objects -Obj1 $beforeConfig -Obj2 $afterConfig
+# Extract prefixes (part before the first '-') from filenames
+$prePrefixes = $preFiles | ForEach-Object { ($_.Name -split '-')[0] } | Sort-Object -Unique
+$postPrefixes = $postFiles | ForEach-Object { ($_.Name -split '-')[0] } | Sort-Object -Unique
 
-if ($diffs.Count -eq 0) {
-    Write-Output "No differences found between $preFilePath and $postFilePath."
+# Check for prefix count and identify missing files
+$allPrefixes = ($prePrefixes + $postPrefixes) | Sort-Object -Unique
+$missingInPre = @()
+$missingInPost = @()
+
+foreach ($prefix in $allPrefixes) {
+    if ($prefix -notin $prePrefixes) {
+        $missingFile = $postFiles | Where-Object { $_.Name -like "$prefix-*.json" } | Select-Object -ExpandProperty Name
+        $missingInPre += [PSCustomObject]@{
+            Prefix = $prefix
+            File   = $missingFile
+            MissingIn = $PreFolder
+        }
+    }
+    if ($prefix -notin $postPrefixes) {
+        $missingFile = $preFiles | Where-Object { $_.Name -like "$prefix-*.json" } | Select-Object -ExpandProperty Name
+        $missingInPost += [PSCustomObject]@{
+            Prefix = $prefix
+            File   = $missingFile
+            MissingIn = $PostFolder
+        }
+    }
+}
+
+# Report missing files
+if ($missingInPre.Count -gt 0 -or $missingInPost.Count -gt 0) {
+    Write-Output "Prefix count mismatch detected:"
+    if ($missingInPre.Count -gt 0) {
+        Write-Output "Files missing in PreFolder ($PreFolder):"
+        $missingInPre | Format-Table -AutoSize
+    }
+    if ($missingInPost.Count -gt 0) {
+        Write-Output "Files missing in PostFolder ($PostFolder):"
+        $missingInPost | Format-Table -AutoSize
+    }
 } else {
-    Write-Output "Differences found:"
-    $diffs | Format-Table -AutoSize
+    Write-Output "Prefix count matches between folders: $($prePrefixes.Count) prefixes found."
 }
+
+# Find matching prefixes for comparison
+$matchingPrefixes = $prePrefixes | Where-Object { $_ -in $postPrefixes }
+
+if (-not $matchingPrefixes) {
+    Write-Warning "No files with matching prefixes found in both folders."
+    exit 0
+}
+
+# Compare files for each matching prefix
+foreach ($prefix in $matchingPrefixes) {
+    Write-Output "Comparing files for prefix: $prefix"
+
+    # Get the first matching file from each folder (assuming one file per VM per folder)
+    $preFile = $preFiles | Where-Object { $_.Name -like "$prefix-*.json" } | Select-Object -First 1
+    $postFile = $postFiles | Where-Object { $_.Name -like "$prefix-*.json" } | Select-Object -First 1
+
+    if (-not $preFile -or -not $postFile) {
+        Write-Warning "Missing file for prefix '$prefix' in one of the folders. Skipping."
+        continue
+    }
+
+    Write-Output "Comparing $($preFile.Name) with $($postFile.Name)"
+
+    # Read the JSON files
+    $beforeConfig = Get-Content -Path $preFile.FullName -Raw | ConvertFrom-Json
+    $afterConfig = Get-Content -Path $postFile.FullName -Raw | ConvertFrom-Json
+
+    # Perform comparison
+    $diffs = Compare-Objects -preCheck $beforeConfig -postCheck $afterConfig
+
+    if ($diffs.Count -eq 0) {
+        Write-Output "No differences found between $($preFile.Name) and $($postFile.Name)."
+    } else {
+        Write-Output "Differences found for $prefix :"
+        $diffs | Format-Table -AutoSize
+    }
+}
+
+Write-Output "Comparison complete."
