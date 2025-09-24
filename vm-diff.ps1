@@ -115,6 +115,46 @@ foreach ($name in $allNames) {
 }
 
 #-------------------------------
+# Separate differences for JSON output
+#-------------------------------
+$nonHagw = @{
+    Missing = New-Object System.Collections.Generic.List[object]
+    Differences = New-Object System.Collections.Generic.List[object]
+}
+$hagw = @{
+    Missing = New-Object System.Collections.Generic.List[object]
+    Differences = New-Object System.Collections.Generic.List[object]
+}
+
+# Function to check if VM name ends with -hagw (basename without extension)
+function IsHagw($fileName) {
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
+    return $baseName -like '*-hagw'
+}
+
+# Categorize missing
+foreach ($m in $missing) {
+    if (IsHagw $m.FileName) {
+        $hagw.Missing.Add($m)
+    } else {
+        $nonHagw.Missing.Add($m)
+    }
+}
+
+# Categorize differences
+foreach ($d in $allDiffs) {
+    if (IsHagw $d.FileName) {
+        $hagw.Differences.Add($d)
+    } else {
+        $nonHagw.Differences.Add($d)
+    }
+}
+
+# Export to JSON files
+$nonHagw | ConvertTo-Json -Depth 5 | Out-File -FilePath "Differences_NonHagw.json" -Encoding utf8
+$hagw | ConvertTo-Json -Depth 5 | Out-File -FilePath "Differences_Hagw.json" -Encoding utf8
+
+#-------------------------------
 # Output
 #-------------------------------
 if ($missing.Count -gt 0) {
@@ -140,3 +180,4 @@ if ($hasDifferences) {
 }
 
 Write-Output "Comparison complete."
+Write-Output "JSON files created: Differences_NonHagw.json and Differences_Hagw.json"
